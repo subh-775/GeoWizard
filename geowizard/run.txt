@@ -1,0 +1,105 @@
+# python script for surface normal estimation from video samples
+import cv2
+import numpy as np
+import os
+from tqdm import tqdm
+from PIL import Image
+import torch
+from models.geowizard_pipeline import DepthNormalEstimationPipeline
+from diffusers import DDIMScheduler, AutoencoderKL
+from models.unet_2d_condition import UNet2DConditionModel
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+
+# Set up logging
+import logging
+logging.basicConfig(level=logging.INFO)
+
+def estimate_surface_normals(frame, pipe):
+    """Estimate surface normals for a single frame."""
+    # Convert frame to PIL Image
+    input_image = Image.fromarray(frame)
+
+    # Estimate surface normals using the pipeline
+    with torch.no_grad():
+        pipe_out = pipe(
+            input_image,
+            denoising_steps=10,  # Adjust as needed
+            ensemble_size=5,     # Adjust as needed
+            processing_res=768,  # Adjust as needed
+            match_input_res=True,
+            domain="indoor",     # Adjust as needed
+            color_map="Spectral",
+            show_progress_bar=False,
+        )
+        normal_colored = pipe_out.normal_colored
+
+    return np.array(normal_colored)
+
+def process_video(input_video_path, output_video_path, pipe):
+    """Process a video to estimate surface normals for each frame."""
+    # Open the input video
+    cap = cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        logging.error(f"Error: Could not open video {input_video_path}")
+        return
+
+    # Get video properties
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Initialize video writer for saving the output video
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+
+    # Process each frame
+    for _ in tqdm(range(total_frames), desc="Processing video frames"):
+        ret, frame = cap.read()
+        if not ret:
+            break  # End of video
+
+        # Convert frame to RGB (OpenCV uses BGR by default)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Estimate surface normals
+        normal_frame = estimate_surface_normals(frame_rgb, pipe)
+
+        # Convert normal frame to BGR for video writing
+        normal_frame_bgr = cv2.cvtColor(normal_frame, cv2.COLOR_RGB2BGR)
+
+        # Write the normal frame to the output video
+        out.write(normal_frame_bgr)
+
+    # Release video capture and writer
+    cap.release()
+    out.release()
+    logging.info(f"Video processing complete. Output saved to {output_video_path}")
+
+def main():
+    """Main function to handle video processing."""
+    # Define paths
+    input_video_path = "/kaggle/working/GeoWizard/geowizard/input/video/source_file.mp4"  # Path to input video
+    output_video_path = "/kaggle/working/GeoWizard/geowizard/output/video/surface_normal45.mp4"  # Path to output video
+
+    # Load the model pipeline
+    checkpoint_path = "lemonaddie/geowizard"  # Pretrained model path
+    vae = AutoencoderKL.from_pretrained(checkpoint_path, subfolder="vae")
+    scheduler = DDIMScheduler.from_pretrained(checkpoint_path, subfolder="scheduler")
+    image_encoder = CLIPVisionModelWithProjection.from_pretrained(checkpoint_path, subfolder="image_encoder")
+    feature_extractor = CLIPImageProcessor.from_pretrained(checkpoint_path, subfolder="feature_extractor")
+    unet = UNet2DConditionModel.from_pretrained(checkpoint_path, subfolder="unet")
+
+    pipe = DepthNormalEstimationPipeline(
+        vae=vae,
+        image_encoder=image_encoder,
+        feature_extractor=feature_extractor,
+        unet=unet,
+        scheduler=scheduler,
+    ).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+
+    # Process the video
+    process_video(input_video_path, output_video_path, pipe)
+
+if __name__ == "__main__":
+    main()
